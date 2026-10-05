@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<section class="panel form-panel narrow"><p>{{ description }}</p><form method="post">{% csrf_token %}<div class="form-actions"><button class="btn danger" type="submit">Подтвердить удаление</button><a class="btn" href="{% url 'dashboard' %}">Отмена</a></div></form></section>{% endblock %}

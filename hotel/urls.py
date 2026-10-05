@@ -1,0 +1,38 @@
+from django.contrib.auth import views as auth_views
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path('login/', auth_views.LoginView.as_view(template_name='login.html'), name='login'),
+    path('logout/', auth_views.LogoutView.as_view(), name='logout'),
+    path('', views.dashboard, name='dashboard'),
+    path('calendar/', views.calendar, name='calendar'),
+    path('bookings/', views.booking_list, name='bookings'),
+    path('history/', views.booking_list, {'history': True}, name='history'),
+    path('bookings/new/', views.booking_edit, name='booking_create'),
+    path('bookings/<int:pk>/', views.booking_detail, name='booking_detail'),
+    path('bookings/<int:pk>/edit/', views.booking_edit, name='booking_edit'),
+    path('bookings/<int:pk>/<str:action>/', views.booking_action, name='booking_action'),
+    path('rooms/', views.rooms, name='rooms'),
+    path('rooms/new/', views.room_edit, name='room_create'),
+    path('rooms/<int:pk>/edit/', views.room_edit, name='room_edit'),
+    path('rooms/<int:pk>/clean/', views.room_clean, name='room_clean'),
+    path('rooms/<int:pk>/delete/', views.room_delete, name='room_delete'),
+    path('guests/', views.guests, name='guests'),
+    path('guests/search/', views.guest_search, name='guest_search'),
+    path('guests/new/', views.guest_edit, name='guest_create'),
+    path('guests/<int:pk>/', views.guest_detail, name='guest_detail'),
+    path('guests/<int:pk>/edit/', views.guest_edit, name='guest_edit'),
+    path('guests/<int:pk>/delete/', views.guest_delete, name='guest_delete'),
+    path('payments/', views.payments, name='payments'),
+    path('payments/new/', views.payment_edit, name='payment_create'),
+    path('payments/<int:pk>/edit/', views.payment_edit, name='payment_edit'),
+    path('payments/<int:pk>/delete/', views.payment_delete, name='payment_delete'),
+    path('documents/upload/<str:kind>/<int:pk>/', views.document_upload, name='document_upload'),
+    path('documents/<int:pk>/', views.document_download, name='document_download'),
+    path('settings/', views.settings_page, name='settings'),
+    path('settings/users/new/', views.user_edit, name='user_create'),
+    path('settings/users/<int:pk>/', views.user_edit, name='user_edit'),
+    path('settings/password/', auth_views.PasswordChangeView.as_view(template_name='form.html', success_url='/settings/', extra_context={'title': 'Изменить пароль'}), name='password_change'),
+    path('audit/', views.audit_list, name='audit'),
+]
