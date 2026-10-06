@@ -148,10 +148,10 @@ class WorkflowTests(TestCase):
 
     def test_admin_permissions(self):
         self.client.force_login(self.employee)
-        for name in ['dashboard', 'calendar', 'bookings', 'rooms', 'history', 'booking_create', 'room_create', 'guests', 'guest_create', 'payments', 'payment_create', 'settings', 'guest_search', 'statistics']:
+        for name in ['dashboard', 'calendar', 'bookings', 'rooms', 'history', 'booking_create', 'guests', 'guest_create', 'payments', 'payment_create', 'settings', 'guest_search', 'statistics']:
             with self.subTest(name=name):
                 self.assertEqual(self.client.get(reverse(name)).status_code, 200)
-        for name in ['audit', 'user_create']:
+        for name in ['audit', 'user_create', 'room_create']:
             self.assertEqual(self.client.get(reverse(name)).status_code, 403)
             self.assertEqual(self.client.post(reverse(name), {'role': 'owner'}).status_code, 403)
         detail = self.client.get(reverse('booking_detail', args=[self.booking.pk]))

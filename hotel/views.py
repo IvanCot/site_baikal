@@ -4,6 +4,7 @@ from pathlib import Path
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.forms import SetPasswordForm
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
@@ -242,7 +243,7 @@ def rooms(request):
     return render(request, 'rooms.html', {'title': 'Номера', 'room_rows': [{'room': r, 'state': r.state} for r in Room.objects.all()]})
 
 
-@manager_required
+@owner_required
 def room_edit(request, pk=None):
     obj = get_object_or_404(Room, pk=pk) if pk else None
     form = RoomForm(request.POST or None, instance=obj)
@@ -275,7 +276,7 @@ def room_clean(request, pk):
     return redirect('rooms')
 
 
-@manager_required
+@owner_required
 def room_delete(request, pk):
     room = get_object_or_404(Room, pk=pk)
     if request.method == 'POST':
@@ -444,24 +445,17 @@ def document_download(request, pk):
 
 @manager_required
 def settings_page(request):
-    return render(request, 'settings.html', {'title': 'Настройки', 'users': User.objects.all().order_by('username')})
+    users = User.objects.all().order_by('username') if request.user.is_owner else User.objects.none()
+    return render(request, 'settings.html', {'title': 'Настройки', 'users': users})
 
 
-@manager_required
+@owner_required
 def user_edit(request, pk=None):
     obj = get_object_or_404(User, pk=pk) if pk else None
-    if not request.user.is_owner and (not pk or obj.role == User.Role.OWNER or obj.is_superuser):
-        raise PermissionDenied
     form = (EditUserForm if pk else CreateUserForm)(request.POST or None, instance=obj)
-    if not request.user.is_owner:
-        del form.fields['role']
     if request.method == 'POST' and form.is_valid():
         with transaction.atomic():
             managers = list(User.objects.select_for_update().filter(role='owner', is_active=True).order_by('pk'))
-            if pk:
-                current = User.objects.select_for_update().get(pk=pk)
-                if not request.user.is_owner and (current.role == User.Role.OWNER or current.is_superuser):
-                    raise PermissionDenied
             edited = form.save(commit=False)
             if pk and obj.pk == request.user.pk and (not edited.is_active or (request.user.is_owner and edited.role != 'owner')):
                 form.add_error(None, 'Нельзя отключить собственный доступ или понизить свою роль владельца.')
@@ -477,6 +471,18 @@ def user_edit(request, pk=None):
                 messages.success(request, 'Пользователь сохранён.')
                 return redirect('settings')
     return render(request, 'form.html', {'title': 'Редактировать пользователя' if pk else 'Новый пользователь', 'form': form})
+
+
+@owner_required
+def user_password_reset(request, pk):
+    user = get_object_or_404(User, pk=pk, role=User.Role.ADMIN, is_superuser=False)
+    form = SetPasswordForm(user, request.POST or None)
+    if request.method == 'POST' and form.is_valid():
+        form.save()
+        audit(request.user, 'Смена пароля пользователя', user, f'Владелец сменил пароль пользователя {user.username}.')
+        messages.success(request, f'Пароль пользователя {user.username} изменён.')
+        return redirect('settings')
+    return render(request, 'form.html', {'title': f'Новый пароль: {user.username}', 'form': form})
 
 
 @owner_required

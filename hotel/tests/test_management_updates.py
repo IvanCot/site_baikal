@@ -105,13 +105,47 @@ class ManagementUpdatesTests(TestCase):
         self.assertEqual(self.client.get(reverse('user_create')).status_code, 403)
         self.assertEqual(self.client.post(reverse('user_create'), {'username': 'evil', 'role': 'owner'}).status_code, 403)
         self.assertEqual(self.client.post(reverse('user_edit', args=[self.owner.pk]), {'role': 'admin'}).status_code, 403)
-        self.assertEqual(self.client.post(reverse('user_edit', args=[self.admin.pk]), {'role': 'owner', 'is_superuser': 'on', 'is_active': 'on'}).status_code, 302)
+        self.assertEqual(self.client.get(reverse('user_edit', args=[self.admin.pk])).status_code, 403)
+        self.assertEqual(self.client.post(reverse('user_edit', args=[self.admin.pk]), {'role': 'owner', 'is_superuser': 'on', 'is_active': 'on'}).status_code, 403)
+        self.assertEqual(self.client.get(reverse('user_password_reset', args=[self.admin.pk])).status_code, 403)
         self.admin.refresh_from_db()
         self.assertEqual(self.admin.role, 'admin')
         self.assertFalse(self.admin.is_superuser)
+        settings_response = self.client.get(reverse('settings'))
+        self.assertNotContains(settings_response, 'Пользователи и доступ')
+        self.assertNotContains(settings_response, self.owner.username)
         self.owner.is_active = False
         self.owner.save()
         self.assertEqual(self.client.get(reverse('user_edit', args=[self.owner.pk])).status_code, 403)
+
+    def test_admin_cannot_create_edit_or_delete_rooms(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(reverse('room_create')).status_code, 403)
+        self.assertEqual(self.client.post(reverse('room_create'), {'name': 'Лишний'}).status_code, 403)
+        self.assertEqual(self.client.get(reverse('room_edit', args=[self.room.pk])).status_code, 403)
+        self.assertEqual(self.client.post(reverse('room_edit', args=[self.room.pk]), {'name': 'Изменён'}).status_code, 403)
+        self.assertEqual(self.client.get(reverse('room_delete', args=[self.room.pk])).status_code, 403)
+        self.assertEqual(self.client.post(reverse('room_delete', args=[self.room.pk])).status_code, 403)
+        self.assertEqual(Room.objects.count(), 1)
+
+    def test_guest_can_be_deleted_from_guest_list(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse('guests'))
+        self.assertContains(response, reverse('guest_delete', args=[self.guest.pk]))
+        response = self.client.post(reverse('guest_delete', args=[self.guest.pk]))
+        self.assertRedirects(response, reverse('guests'))
+        self.assertFalse(Guest.objects.filter(pk=self.guest.pk).exists())
+
+    def test_owner_can_reset_admin_password(self):
+        self.client.force_login(self.owner)
+        response = self.client.post(reverse('user_password_reset', args=[self.admin.pk]), {
+            'new_password1': 'Brand-new-Strong-872!',
+            'new_password2': 'Brand-new-Strong-872!',
+        })
+        self.assertRedirects(response, reverse('settings'))
+        self.admin.refresh_from_db()
+        self.assertTrue(self.admin.check_password('Brand-new-Strong-872!'))
+        self.assertTrue(AuditLog.objects.filter(action='Смена пароля пользователя', user=self.owner).exists())
 
     def test_owner_can_create_admin_and_view_audit(self):
         self.client.force_login(self.owner)

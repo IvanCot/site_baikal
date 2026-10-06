@@ -35,6 +35,7 @@ urlpatterns = [
     path('settings/', views.settings_page, name='settings'),
     path('settings/users/new/', views.user_edit, name='user_create'),
     path('settings/users/<int:pk>/', views.user_edit, name='user_edit'),
+    path('settings/users/<int:pk>/password/', views.user_password_reset, name='user_password_reset'),
     path('settings/password/', auth_views.PasswordChangeView.as_view(template_name='form.html', success_url='/settings/', extra_context={'title': 'Изменить пароль'}), name='password_change'),
     path('audit/', views.audit_list, name='audit'),
 ]
