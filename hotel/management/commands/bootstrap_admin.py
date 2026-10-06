@@ -6,7 +6,7 @@ from hotel.models import User
 
 
 class Command(BaseCommand):
-    help = 'Создаёт администратора из ADMIN_USERNAME / ADMIN_PASSWORD только при отсутствии такого логина.'
+    help = 'Создаёт владельца из ADMIN_USERNAME / ADMIN_PASSWORD только при отсутствии такого логина.'
 
     def handle(self, *args, **options):
         username, password = os.getenv('ADMIN_USERNAME'), os.getenv('ADMIN_PASSWORD')
@@ -16,8 +16,8 @@ class Command(BaseCommand):
             self.stdout.write('Указанная учётная запись уже существует; пароль и права не изменены.')
             return
         if not password:
-            raise CommandError('Для создания администратора укажите ADMIN_PASSWORD.')
-        user = User(username=username, role=User.Role.ADMIN, email=os.getenv('ADMIN_EMAIL', ''))
+            raise CommandError('Для создания владельца укажите ADMIN_PASSWORD.')
+        user = User(username=username, role=User.Role.OWNER, email=os.getenv('ADMIN_EMAIL', ''))
         try:
             validate_password(password, user)
             user.full_clean(exclude=['password'])
@@ -27,4 +27,4 @@ class Command(BaseCommand):
         user.is_staff = True
         user.is_superuser = True
         user.save()
-        self.stdout.write(self.style.SUCCESS('Администратор создан.'))
+        self.stdout.write(self.style.SUCCESS('Владелец создан.'))

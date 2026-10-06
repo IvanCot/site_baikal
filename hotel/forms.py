@@ -1,4 +1,5 @@
 from decimal import Decimal
+from copy import deepcopy
 from django import forms
 from django.contrib.auth.forms import UserCreationForm
 from django.core.exceptions import ValidationError
@@ -38,25 +39,31 @@ class BookingForm(forms.ModelForm):
     primary_guest = forms.ModelChoiceField(label='Основной гость из справочника', queryset=Guest.objects.all(), required=False)
     new_guest_name = forms.CharField(label='ФИО нового гостя', max_length=200, required=False)
     new_guest_phone = forms.CharField(label='Телефон нового гостя', max_length=40, required=False)
-    companions = forms.ModelMultipleChoiceField(label='Сопровождающие из справочника', queryset=Guest.objects.all(), required=False)
     prepayment = forms.DecimalField(label='Предоплата, ₽', max_digits=12, decimal_places=2, min_value=Decimal('0'), initial=0, required=False)
     payment_method = forms.ChoiceField(label='Способ предоплаты', choices=Payment.Method.choices)
-    documents = MultipleFileField(label='Документы', required=False, help_text='До 5 файлов по 10 МБ. JPG, PNG, WEBP, PDF.')
-    document_comment = forms.CharField(label='Комментарий к документам', max_length=400, required=False)
+    payment_comment = forms.CharField(label='Комментарий к предоплате', required=False, widget=forms.Textarea(attrs={'rows': 2}))
 
     class Meta:
         model = Booking
-        fields = ['room', 'primary_guest', 'check_in', 'check_out', 'guest_count', 'total_cost', 'linen_sets', 'comment']
+        fields = ['room', 'primary_guest', 'check_in', 'check_out', 'guest_count', 'comment']
         widgets = {'check_in': DateTimeInput(), 'check_out': DateTimeInput(), 'comment': forms.Textarea(attrs={'rows': 3})}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        passport_form = GuestForm()
+        for name in ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on', 'passport_photo']:
+            self.fields[name] = deepcopy(passport_form.fields[name])
+            if name != 'passport_photo':
+                self.fields[name].validators.extend(Guest._meta.get_field(name).validators)
+            if self.instance.pk and name != 'passport_photo':
+                self.fields[name].initial = getattr(self.instance.primary_guest, name)
+        self.original = Booking.objects.filter(pk=self.instance.pk).first() if self.instance.pk else None
         self.fields['room'].queryset = Room.objects.filter(active=True).exclude(service_status=Room.Service.UNAVAILABLE)
         if self.instance.pk:
             self.fields['room'].queryset = Room.objects.filter(active=True) | Room.objects.filter(pk=self.instance.room_id)
-            self.fields['companions'].initial = self.instance.additional_guests.all()
             del self.fields['prepayment']
             del self.fields['payment_method']
+            del self.fields['payment_comment']
 
     def clean(self):
         data = super().clean()
@@ -66,18 +73,29 @@ class BookingForm(forms.ModelForm):
             self.add_error('primary_guest', 'Выберите существующего гостя или укажите ФИО и телефон нового.')
         if guest and (name or phone):
             self.add_error('new_guest_name', 'Выберите существующего гостя или заполните нового, без одновременного ввода.')
-        companions = data.get('companions', [])
-        if guest and guest in companions:
-            self.add_error('companions', 'Основной гость уже включён в бронирование.')
-        if data.get('guest_count') and len(companions) + 1 > data['guest_count']:
-            self.add_error('guest_count', 'Количество гостей меньше числа выбранных людей.')
+        if data.get('prepayment') and data.get('payment_method') == 'other' and not data.get('payment_comment', '').strip():
+            self.add_error('payment_comment', 'Для способа «Другое» укажите, как была выполнена оплата.')
+        if bool(data.get('passport_series')) != bool(data.get('passport_number')):
+            self.add_error('passport_number', 'Укажите и серию, и номер паспорта или оставьте оба поля пустыми.')
         return data
+
+    def clean_passport_photo(self):
+        return GuestForm.clean_passport_photo(self)
+
+    def _post_clean(self):
+        room = self.cleaned_data.get('room')
+        start, end = self.cleaned_data.get('check_in'), self.cleaned_data.get('check_out')
+        if room and start and end and end > start:
+            from .services import price_booking
+            self.instance.room, self.instance.check_in, self.instance.check_out = room, start, end
+            price_booking(self.instance, self.original)
+        super()._post_clean()
 
 
 class RoomForm(forms.ModelForm):
     class Meta:
         model = Room
-        fields = ['name', 'beds', 'capacity', 'comment', 'active', 'service_status']
+        fields = ['name', 'beds', 'capacity', 'daily_rate', 'comment', 'active', 'service_status']
         widgets = {'comment': forms.Textarea(attrs={'rows': 3})}
 
     def clean_capacity(self):
@@ -97,10 +115,23 @@ class RoomForm(forms.ModelForm):
 
 
 class GuestForm(forms.ModelForm):
+    passport_photo = forms.FileField(label='Фото паспорта (необязательно)', required=False,
+                                    widget=forms.ClearableFileInput(attrs={'accept': 'image/jpeg,image/png,image/webp'}),
+                                    help_text='JPG, PNG или WEBP, до 10 МБ. Фото будет доступно только после входа.')
     class Meta:
         model = Guest
-        fields = ['full_name', 'phone', 'email', 'comment']
-        widgets = {'comment': forms.Textarea(attrs={'rows': 3})}
+        fields = ['full_name', 'phone', 'email', 'passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on', 'comment']
+        widgets = {'comment': forms.Textarea(attrs={'rows': 3}), 'passport_series': forms.TextInput(attrs={'inputmode': 'numeric', 'pattern': '[0-9]{4}'}),
+                   'passport_number': forms.TextInput(attrs={'inputmode': 'numeric', 'pattern': '[0-9]{6}'}),
+                   'passport_issued_on': forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d')}
+
+    def clean_passport_photo(self):
+        photo = self.cleaned_data.get('passport_photo')
+        if photo:
+            validate_document(photo)
+            if photo.name.lower().rsplit('.', 1)[-1] not in ['jpg', 'jpeg', 'png', 'webp']:
+                raise ValidationError('Фото паспорта должно быть в формате JPG, PNG или WEBP.')
+        return photo
 
 
 class PaymentForm(forms.ModelForm):
@@ -111,7 +142,7 @@ class PaymentForm(forms.ModelForm):
 
 
 class DocumentForm(forms.Form):
-    documents = MultipleFileField(label='Документы', required=True, help_text='JPG, PNG, WEBP, PDF — не более 10 МБ на файл.')
+    documents = MultipleFileField(label='Фото или сканы паспорта', required=True, help_text='JPG, PNG, WEBP, PDF — не более 10 МБ на файл. Файлы привязаны к этому гостю.')
     comment = forms.CharField(label='Комментарий', max_length=400, required=False)
 
     def clean_documents(self):
@@ -134,5 +165,5 @@ class EditUserForm(forms.ModelForm):
 
     def clean_role(self):
         if self.instance.is_superuser:
-            return User.Role.ADMIN
+            return User.Role.OWNER
         return self.cleaned_data['role']

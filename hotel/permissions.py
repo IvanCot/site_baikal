@@ -11,3 +11,13 @@ def manager_required(view):
             raise PermissionDenied
         return view(request, *args, **kwargs)
     return wrapped
+
+
+def owner_required(view):
+    @login_required
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_owner:
+            raise PermissionDenied
+        return view(request, *args, **kwargs)
+    return wrapped

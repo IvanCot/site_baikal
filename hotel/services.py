@@ -4,6 +4,16 @@ from django.utils import timezone
 from .models import AuditLog, Booking, Room
 
 
+def price_booking(booking, previous=None):
+    """Сохраняет тариф брони; старые ручные суммы остаются без изменений."""
+    same_room = previous and previous.room_id == booking.room_id
+    if same_room and previous.check_in == booking.check_in and previous.check_out == booking.check_out:
+        booking.daily_rate, booking.total_cost = previous.daily_rate, previous.total_cost
+        return
+    booking.daily_rate = previous.daily_rate if same_room and previous.daily_rate is not None else booking.room.daily_rate
+    booking.total_cost = booking.daily_rate * booking.stay_days
+
+
 def audit(user, action, obj, description):
     AuditLog.objects.create(user=user, action=action, object_type=obj.__class__.__name__,
                             object_id=str(obj.pk), description=description)

@@ -355,3 +355,33 @@ footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+.payment-totals { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; padding: 0 24px 22px; }
+.payment-totals > div { min-width: 0; }
+.payment-totals small { display: block; color: var(--muted); font-size: 12px; }
+.payment-totals strong { display: block; margin-top: 5px; font-size: 18px; overflow-wrap: anywhere; }
+.payment-details { border-top: 1px solid var(--line); }
+.payment-details > summary { cursor: pointer; padding: 16px 24px; color: var(--green); font-weight: 600; font-size: 13px; }
+.report-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
+.report-value { font-size: clamp(20px, 2vw, 28px); font-weight: 600; margin-top: 12px; overflow-wrap: anywhere; }
+.report-chart { padding: 0 24px 24px; max-height: 560px; overflow-y: auto; overscroll-behavior: contain; }
+.chart-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 16px; padding: 15px 0; border-top: 1px solid var(--line); }
+.chart-label { font-size: 12px; color: var(--muted); }
+.chart-metrics { min-width: 0; display: grid; gap: 8px; }
+.chart-metric { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 16px; align-items: center; font-size: 12px; }
+.chart-metric > strong, .chart-metric > span:last-child { text-align: right; font-weight: 500; overflow-wrap: anywhere; }
+.chart-track { background: #f0f1e8; border-radius: 4px; height: 12px; overflow: hidden; }
+.chart-bar { display: block; height: 100%; border-radius: inherit; }
+.chart-bar.money { background: #527762; }
+.chart-bar.visitors { background: #c7a46d; }
+@media (max-width: 1100px) { .report-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) {
+  .payment-totals { padding: 0 18px 18px; gap: 18px; }
+  .payment-totals > div { flex: 1 1 100px; }
+  .payment-details > summary { padding: 15px 18px; }
+  .report-grid { gap: 10px; }
+  .report-value { font-size: 19px; }
+  .report-chart { padding: 0 18px 18px; }
+  .chart-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .chart-metric { grid-template-columns: minmax(0, 1fr) 135px; gap: 12px; }
+}

@@ -4,6 +4,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const backdrop = document.getElementById('sidebar-backdrop');
   const close = document.getElementById('menu-close');
   const drawer = window.matchMedia('(max-width: 900px)');
+  const scrollActiveMenu = () => {
+    const nav = sidebar?.querySelector('nav');
+    const active = nav?.querySelector('a.active');
+    if (active) nav.scrollTop += active.getBoundingClientRect().top - nav.getBoundingClientRect().top - (nav.clientHeight - active.clientHeight) / 2;
+  };
   const setMenu = (open, returnFocus = false) => {
     if (!sidebar) return;
     const expanded = drawer.matches && open;
@@ -13,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('menu-open', expanded);
     toggle.setAttribute('aria-expanded', String(expanded));
     toggle.setAttribute('aria-label', expanded ? 'Закрыть меню' : 'Открыть меню');
-    if (expanded) close.focus();
+    if (expanded) { scrollActiveMenu(); close.focus(); }
     else if (returnFocus) toggle.focus();
   };
   toggle?.addEventListener('click', () => setMenu(!sidebar.classList.contains('open')));
@@ -21,6 +26,85 @@ document.addEventListener('DOMContentLoaded', () => {
   backdrop?.addEventListener('click', () => setMenu(false, true));
   drawer.addEventListener('change', () => setMenu(false));
   setMenu(false);
+  scrollActiveMenu();
+  const pricingElement = document.getElementById('booking-pricing');
+  if (pricingElement) {
+    const pricing = JSON.parse(pricingElement.textContent);
+    const room = document.getElementById('id_room');
+    const start = document.getElementById('id_check_in');
+    const end = document.getElementById('id_check_out');
+    const currency = new Intl.NumberFormat('ru-RU', {style: 'currency', currency: 'RUB'});
+    const cents = value => {
+      const [whole, fraction = ''] = String(value).split('.');
+      return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0').slice(0, 2));
+    };
+    const localDay = value => {
+      const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+      return Date.UTC(year, month - 1, day);
+    };
+    const updatePrice = () => {
+      const original = pricing.original;
+      const unchanged = original && room.value === original.room && start.value === original.start && end.value === original.end;
+      const rate = original && room.value === original.room && original.rate !== null ? original.rate : pricing.rates[room.value];
+      const days = start.value && end.value && end.value > start.value ? Math.max(1, Math.round((localDay(end.value) - localDay(start.value)) / 86400000)) : null;
+      document.getElementById('booking-rate').textContent = unchanged && original.rate === null ? 'Ранее согласованная сумма' : rate !== undefined ? currency.format(Number(rate)) : '—';
+      document.getElementById('booking-days').textContent = days ?? '—';
+      const total = unchanged ? cents(original.total) : days && rate !== undefined ? cents(rate) * BigInt(days) : null;
+      document.getElementById('booking-total').textContent = total === null ? '—' : currency.format(Number(total) / 100);
+    };
+    [room, start, end].forEach(input => input.addEventListener('input', updatePrice));
+    updatePrice();
+  }
+  const method = document.getElementById('id_method') || document.getElementById('id_payment_method');
+  const paymentComment = document.getElementById('id_payment_comment') || (method && document.getElementById('id_comment'));
+  const prepayment = document.getElementById('id_prepayment');
+  if (method && paymentComment) {
+    const updateRequired = () => {
+      paymentComment.required = method.value === 'other' && (!prepayment || Number(prepayment.value) > 0);
+      paymentComment.placeholder = method.value === 'other' ? 'Укажите, как была выполнена оплата' : 'Необязательный комментарий';
+    };
+    method.addEventListener('change', updateRequired);
+    prepayment?.addEventListener('input', updateRequired);
+    updateRequired();
+  }
+  const selectedGuest = document.getElementById('id_primary_guest');
+  if (selectedGuest) {
+    let passportRequest;
+    let passportReady = true;
+    const status = document.getElementById('passport-load-status');
+    const names = ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on'];
+    selectedGuest.form.addEventListener('submit', event => {
+      if (!passportReady) {
+        event.preventDefault();
+        status.textContent = 'Сначала дождитесь загрузки паспорта или повторно выберите гостя.';
+        status.scrollIntoView({block: 'center'});
+      }
+    });
+    selectedGuest.addEventListener('change', async () => {
+      passportRequest?.abort();
+      passportRequest = new AbortController();
+      const activeRequest = passportRequest;
+      passportReady = !selectedGuest.value;
+      const fields = names.map(name => document.getElementById(`id_${name}`));
+      fields.forEach(field => { field.value = ''; field.disabled = !!selectedGuest.value; });
+      document.getElementById('id_passport_photo').value = '';
+      status.textContent = selectedGuest.value ? 'Загружаем данные выбранного гостя…' : '';
+      if (!selectedGuest.value) return;
+      try {
+        const response = await fetch(`/guests/${selectedGuest.value}/passport/`, {signal: activeRequest.signal, cache: 'no-store'});
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (activeRequest !== passportRequest) return;
+        names.forEach((name, index) => { fields[index].value = data[name]; });
+        passportReady = true;
+        status.textContent = 'Данные выбранного гостя загружены.';
+      } catch (error) {
+        if (error.name !== 'AbortError') status.textContent = 'Не удалось загрузить паспорт. Повторно выберите гостя.';
+      } finally {
+        if (activeRequest === passportRequest) fields.forEach(field => { field.disabled = false; });
+      }
+    });
+  }
   document.addEventListener('keydown', event => {
     if (!sidebar?.classList.contains('open')) return;
     if (event.key === 'Escape') setMenu(false, true);
@@ -80,6 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const select = document.getElementById('id_primary_guest');
             if (![...select.options].some(option => option.value === String(guest.id))) select.add(new Option(guest.text, guest.id));
             select.value = String(guest.id);
+            select.dispatchEvent(new Event('change'));
             document.getElementById('id_new_guest_name').value = '';
             document.getElementById('id_new_guest_phone').value = '';
             search.value = guest.text;

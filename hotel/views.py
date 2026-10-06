@@ -14,12 +14,13 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
+from django.views.decorators.cache import never_cache
 
 from .forms import (BookingForm, CreateUserForm, DocumentForm, EditUserForm, GuestForm,
                     PaymentForm, RoomForm)
 from .models import AuditLog, Booking, BookingGuest, Document, Guest, Payment, Room, User
-from .permissions import manager_required
-from .services import audit, transition
+from .permissions import manager_required, owner_required
+from .services import audit, price_booking, transition
 
 
 def local_midnight(day):
@@ -122,6 +123,7 @@ def booking_list(request, history=False):
 
 
 @login_required
+@never_cache
 def booking_detail(request, pk):
     booking = get_object_or_404(Booking.objects.select_related('room', 'primary_guest').prefetch_related('additional_guests'), pk=pk)
     return render(request, 'booking_detail.html', {'title': str(booking), 'booking': booking})
@@ -139,6 +141,7 @@ def save_documents(files, user, guest=None, booking=None, comment='', saved=None
 
 
 @manager_required
+@never_cache
 def booking_edit(request, pk=None):
     booking = get_object_or_404(Booking, pk=pk) if pk else None
     if booking and booking.status not in ['reserved', 'occupied']:
@@ -164,23 +167,33 @@ def booking_edit(request, pk=None):
                     if before.status not in ['reserved', 'occupied']:
                         raise ValidationError('Статус бронирования изменился. Обновите страницу.')
                     obj.status, obj.actual_check_in, obj.actual_check_out = before.status, before.actual_check_in, before.actual_check_out
+                obj.room = Room.objects.get(pk=obj.room_id)
+                price_booking(obj, before if pk else None)
                 if not form.cleaned_data['primary_guest']:
                     guest, created = Guest.objects.get_or_create(full_name=form.cleaned_data['new_guest_name'], phone=form.cleaned_data['new_guest_phone'])
                     obj.primary_guest = guest
                     if created:
                         audit(request.user, 'Создание гостя', guest, 'Создан гость при бронировании.')
+                passport_names = ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on']
+                if any(name in request.POST for name in passport_names):
+                    guest = Guest.objects.select_for_update().get(pk=obj.primary_guest_id)
+                    for name in passport_names:
+                        setattr(guest, name, form.cleaned_data.get(name))
+                    guest.full_clean()
+                    guest.save(update_fields=passport_names)
+                    obj.primary_guest = guest
+                    audit(request.user, 'Паспортные данные', guest, 'Обновлены паспортные данные гостя при бронировании.')
+                if form.cleaned_data.get('passport_photo'):
+                    save_documents([form.cleaned_data['passport_photo']], request.user, guest=obj.primary_guest,
+                                   comment='Фото паспорта', saved=saved_files)
                 obj.save()
-                BookingGuest.objects.filter(booking=obj).delete()
-                BookingGuest.objects.bulk_create([BookingGuest(booking=obj, guest=g) for g in form.cleaned_data['companions']])
                 if not pk and form.cleaned_data.get('prepayment'):
-                    payment = Payment.objects.create(booking=obj, amount=form.cleaned_data['prepayment'], method=form.cleaned_data['payment_method'], created_by=request.user)
+                    payment = Payment.objects.create(booking=obj, amount=form.cleaned_data['prepayment'], method=form.cleaned_data['payment_method'], comment=form.cleaned_data.get('payment_comment', ''), created_by=request.user)
                     audit(request.user, 'Добавление платежа', payment, f'Предоплата {payment.amount} ₽, бронирование №{obj.number}.')
-                save_documents(form.cleaned_data['documents'], request.user, booking=obj,
-                               comment=form.cleaned_data['document_comment'], saved=saved_files)
                 description = f'Бронирование №{obj.number}: сохранено.'
                 if pk:
                     changes = []
-                    for field in ['room_id', 'check_in', 'check_out', 'guest_count', 'total_cost', 'linen_sets', 'primary_guest_id', 'comment']:
+                    for field in ['room_id', 'check_in', 'check_out', 'guest_count', 'total_cost', 'primary_guest_id', 'comment']:
                         old, new = getattr(before, field), getattr(obj, field)
                         if old != new:
                             label = obj._meta.get_field(field.removesuffix('_id')).verbose_name
@@ -202,7 +215,12 @@ def booking_edit(request, pk=None):
             for file in saved_files:
                 file.delete(save=False)
             raise
-    return render(request, 'booking_form.html', {'title': 'Редактировать бронирование' if pk else 'Новое бронирование', 'form': form, 'booking': booking})
+    rates = {str(room.pk): str(room.daily_rate) for room in form.fields['room'].queryset}
+    original = form.original
+    pricing = {'rates': rates, 'original': {'room': str(original.room_id), 'rate': str(original.daily_rate) if original.daily_rate is not None else None,
+               'start': timezone.localtime(original.check_in).strftime('%Y-%m-%dT%H:%M'), 'end': timezone.localtime(original.check_out).strftime('%Y-%m-%dT%H:%M'),
+               'total': str(original.total_cost)} if original else None}
+    return render(request, 'booking_form.html', {'title': 'Редактировать бронирование' if pk else 'Новое бронирование', 'form': form, 'booking': booking, 'pricing': pricing})
 
 
 @login_required
@@ -289,19 +307,37 @@ def guest_search(request):
 
 
 @manager_required
+def guest_passport(request, pk):
+    guest = get_object_or_404(Guest, pk=pk)
+    response = JsonResponse({name: getattr(guest, name) or '' for name in ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on']})
+    response['Cache-Control'] = 'private, no-store'
+    return response
+
+
+@manager_required
+@never_cache
 def guest_edit(request, pk=None):
     obj = get_object_or_404(Guest, pk=pk) if pk else None
-    form = GuestForm(request.POST or None, instance=obj)
+    form = GuestForm(request.POST or None, request.FILES or None, instance=obj)
     if request.method == 'POST' and form.is_valid():
-        with transaction.atomic():
-            obj = form.save()
-            audit(request.user, 'Изменение гостя' if pk else 'Создание гостя', obj, 'Сохранена карточка гостя.')
+        saved = []
+        try:
+            with transaction.atomic():
+                obj = form.save()
+                if form.cleaned_data.get('passport_photo'):
+                    save_documents([form.cleaned_data['passport_photo']], request.user, guest=obj, comment='Фото паспорта', saved=saved)
+                audit(request.user, 'Изменение гостя' if pk else 'Создание гостя', obj, 'Сохранена карточка гостя.')
+        except Exception:
+            for file in saved:
+                file.delete(save=False)
+            raise
         messages.success(request, 'Карточка гостя сохранена.')
         return redirect('guest_detail', pk=obj.pk)
     return render(request, 'form.html', {'title': 'Редактировать гостя' if pk else 'Новый гость', 'form': form})
 
 
 @manager_required
+@never_cache
 def guest_detail(request, pk):
     guest = get_object_or_404(Guest, pk=pk)
     stays = Booking.objects.filter(Q(primary_guest=guest) | Q(additional_guests=guest)).distinct().select_related('room')
@@ -325,11 +361,11 @@ def guest_delete(request, pk):
 
 @manager_required
 def payments(request):
-    qs = Payment.objects.select_related('booking', 'booking__primary_guest', 'created_by')
+    qs = Booking.objects.filter(payments__isnull=False).distinct().select_related('room', 'primary_guest').prefetch_related('payments__created_by')
     q = request.GET.get('q', '').strip()[:200]
     if q:
-        qs = qs.filter(Q(booking__number__icontains=q) | Q(booking__primary_guest__full_name__icontains=q))
-    return render(request, 'payments.html', {'title': 'Оплаты', 'payments': page(request, qs), 'q': q})
+        qs = qs.filter(Q(number__icontains=q) | Q(primary_guest__full_name__icontains=q) | Q(room__name__icontains=q))
+    return render(request, 'payments.html', {'title': 'Оплаты по бронированиям', 'bookings': page(request, qs.order_by('-check_in', '-pk')), 'q': q})
 
 
 @manager_required
@@ -375,6 +411,8 @@ def document_upload(request, kind, pk):
     if kind not in ['guest', 'booking']:
         raise Http404
     obj = get_object_or_404(Guest if kind == 'guest' else Booking, pk=pk)
+    if kind == 'booking':
+        return redirect('guest_edit', pk=obj.primary_guest_id)
     form = DocumentForm(request.POST or None, request.FILES or None)
     if request.method == 'POST' and form.is_valid():
         saved = []
@@ -387,7 +425,7 @@ def document_upload(request, kind, pk):
             raise
         messages.success(request, 'Документы загружены.')
         return redirect('guest_detail' if kind == 'guest' else 'booking_detail', pk=pk)
-    return render(request, 'form.html', {'title': 'Прикрепить документы', 'form': form})
+    return render(request, 'form.html', {'title': f'Фото / сканы паспорта: {obj.full_name}', 'form': form})
 
 
 @manager_required
@@ -412,17 +450,28 @@ def settings_page(request):
 @manager_required
 def user_edit(request, pk=None):
     obj = get_object_or_404(User, pk=pk) if pk else None
+    if not request.user.is_owner and (not pk or obj.role == User.Role.OWNER or obj.is_superuser):
+        raise PermissionDenied
     form = (EditUserForm if pk else CreateUserForm)(request.POST or None, instance=obj)
+    if not request.user.is_owner:
+        del form.fields['role']
     if request.method == 'POST' and form.is_valid():
         with transaction.atomic():
-            managers = list(User.objects.select_for_update().filter(Q(role='admin') | Q(is_superuser=True), is_active=True).order_by('pk'))
+            managers = list(User.objects.select_for_update().filter(role='owner', is_active=True).order_by('pk'))
+            if pk:
+                current = User.objects.select_for_update().get(pk=pk)
+                if not request.user.is_owner and (current.role == User.Role.OWNER or current.is_superuser):
+                    raise PermissionDenied
             edited = form.save(commit=False)
-            if pk and obj.pk == request.user.pk and not (edited.is_active and (edited.role == 'admin' or edited.is_superuser)):
-                form.add_error(None, 'Нельзя отключить собственный доступ администратора.')
-            elif pk and len(managers) == 1 and managers[0].pk == pk and not (edited.is_active and (edited.role == 'admin' or edited.is_superuser)):
-                form.add_error(None, 'В системе должен оставаться активный администратор.')
+            if pk and obj.pk == request.user.pk and (not edited.is_active or (request.user.is_owner and edited.role != 'owner')):
+                form.add_error(None, 'Нельзя отключить собственный доступ или понизить свою роль владельца.')
+            elif pk and len(managers) == 1 and managers[0].pk == pk and not (edited.is_active and edited.role == 'owner'):
+                form.add_error(None, 'В системе должен оставаться активный владелец.')
             else:
-                edited.save()
+                if pk:
+                    edited.save(update_fields=list(form.fields))
+                else:
+                    edited.save()
                 audit(request.user, 'Изменение пользователя' if pk else 'Создание пользователя', edited,
                       f'Пользователь {edited.username}: {edited.get_role_display()}, активен: {edited.is_active}.')
                 messages.success(request, 'Пользователь сохранён.')
@@ -430,13 +479,22 @@ def user_edit(request, pk=None):
     return render(request, 'form.html', {'title': 'Редактировать пользователя' if pk else 'Новый пользователь', 'form': form})
 
 
-@manager_required
+@owner_required
 def audit_list(request):
     qs = AuditLog.objects.select_related('user')
     q = request.GET.get('q', '').strip()[:200]
     if q:
         qs = qs.filter(Q(action__icontains=q) | Q(description__icontains=q) | Q(user__username__icontains=q))
     return render(request, 'audit.html', {'title': 'Журнал действий', 'logs': page(request, qs), 'q': q})
+
+
+@manager_required
+def statistics(request):
+    from .reporting import build_report
+    anchor = parsed_date(request.GET.get('date'), timezone.localdate())
+    period = request.GET.get('period', 'day')
+    report = build_report(period, anchor)
+    return render(request, 'statistics.html', {'title': 'Статистика гостевого дома', **report})
 
 
 def error403(request, exception):

@@ -22,9 +22,9 @@ from hotel.validators import validate_document
 @override_settings(SECURE_SSL_REDIRECT=False, ALLOWED_HOSTS=['testserver', 'localhost'])
 class WorkflowTests(TestCase):
     def setUp(self):
-        self.admin = User.objects.create_user('admin', password='Test-pass-4638!', role='admin')
+        self.admin = User.objects.create_user('admin', password='Test-pass-4638!', role='owner')
         self.employee = User.objects.create_user('employee', password='Test-pass-4638!')
-        self.room = Room.objects.create(name='№11', beds=2, capacity=3)
+        self.room = Room.objects.create(name='№11', beds=2, capacity=3, daily_rate=Decimal('7500'))
         self.guest = Guest.objects.create(full_name='Иванов Иван', phone='+7 900 100-00-00')
         self.now = timezone.now().replace(second=0, microsecond=0)
         self.booking = self.make_booking()
@@ -135,10 +135,8 @@ class WorkflowTests(TestCase):
             transition(self.booking.pk, 'checkin', self.employee)
         self.make_booking(check_in=self.booking.check_out, check_out=self.booking.check_out + timedelta(days=1))
 
-    def test_employee_cannot_cancel(self):
-        with self.assertRaises(ValidationError):
-            transition(self.booking.pk, 'cancel', self.employee)
-        transition(self.booking.pk, 'cancel', self.admin)
+    def test_admin_can_cancel(self):
+        transition(self.booking.pk, 'cancel', self.employee)
         self.booking.refresh_from_db()
         self.assertEqual(self.booking.status, 'cancelled')
 
@@ -148,21 +146,17 @@ class WorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             Booking.objects.filter(pk=self.booking.pk).delete()
 
-    def test_employee_permissions(self):
+    def test_admin_permissions(self):
         self.client.force_login(self.employee)
-        for name in ['dashboard', 'calendar', 'bookings', 'rooms', 'history']:
+        for name in ['dashboard', 'calendar', 'bookings', 'rooms', 'history', 'booking_create', 'room_create', 'guests', 'guest_create', 'payments', 'payment_create', 'settings', 'guest_search', 'statistics']:
             with self.subTest(name=name):
                 self.assertEqual(self.client.get(reverse(name)).status_code, 200)
-        for name in ['booking_create', 'room_create', 'guests', 'guest_create', 'payments', 'payment_create', 'settings', 'audit', 'guest_search']:
-            with self.subTest(name=name):
-                self.assertEqual(self.client.get(reverse(name)).status_code, 403)
-                self.assertEqual(self.client.post(reverse(name), {}).status_code, 403)
+        for name in ['audit', 'user_create']:
+            self.assertEqual(self.client.get(reverse(name)).status_code, 403)
+            self.assertEqual(self.client.post(reverse(name), {'role': 'owner'}).status_code, 403)
         detail = self.client.get(reverse('booking_detail', args=[self.booking.pk]))
-        self.assertNotContains(detail, 'Стоимость')
-        self.assertNotContains(detail, 'Документы')
-        self.assertEqual(self.client.post(reverse('booking_action', args=[self.booking.pk, 'cancel'])).status_code, 403)
-        self.booking.refresh_from_db()
-        self.assertEqual(self.booking.status, 'reserved')
+        self.assertContains(detail, 'Стоимость')
+        self.assertContains(detail, 'Паспорт гостя')
 
     def test_admin_pages_render(self):
         self.client.force_login(self.admin)
@@ -177,18 +171,24 @@ class WorkflowTests(TestCase):
             with self.subTest(name=name):
                 self.assertEqual(self.client.get(reverse(name, args=[pk])).status_code, 200)
 
-    def test_booking_create_with_companions_prepayment_and_document(self):
-        companion = Guest.objects.create(full_name='Иванова Анна', phone='+7 900 200-00-00')
+    def test_booking_create_with_prepayment_and_personal_passport(self):
         self.client.force_login(self.admin)
-        data = self.booking_data(companions=[companion.pk], documents=SimpleUploadedFile('паспорт.pdf', b'%PDF-1.4\n%%EOF', content_type='application/pdf'))
+        stream = io.BytesIO()
+        Image.new('RGB', (20, 20), 'white').save(stream, format='PNG')
+        data = self.booking_data(passport_series='0012', passport_number='000123', passport_photo=SimpleUploadedFile('паспорт.png', stream.getvalue()))
         with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
             response = self.client.post(reverse('booking_create'), data)
             self.assertEqual(response.status_code, 302)
             created = Booking.objects.exclude(pk=self.booking.pk).get()
-            self.assertEqual(created.additional_guests.get(), companion)
+            self.assertEqual(created.additional_guests.count(), 0)
             self.assertEqual(created.paid, Decimal('5000'))
-            self.assertEqual(created.documents.count(), 1)
-            self.assertNotIn('паспорт', created.documents.get().file.name)
+            self.assertEqual(created.total_cost, Decimal('7500'))
+            self.assertEqual(created.documents.count(), 0)
+            self.guest.refresh_from_db()
+            self.assertEqual(self.guest.passport_series, '0012')
+            self.assertEqual(self.guest.passport_number, '000123')
+            self.assertEqual(self.guest.documents.count(), 1)
+            self.assertNotIn('паспорт', self.guest.documents.get().file.name)
             self.assertTrue(AuditLog.objects.filter(action='Создание бронирования').exists())
 
     def test_new_guest_and_inline_validation(self):
@@ -244,10 +244,10 @@ class WorkflowTests(TestCase):
 
     def test_last_admin_and_self_disable_prohibited(self):
         self.client.force_login(self.admin)
-        response = self.client.post(reverse('user_edit', args=[self.admin.pk]), {'role': 'employee', 'is_active': 'on'})
+        response = self.client.post(reverse('user_edit', args=[self.admin.pk]), {'role': 'admin', 'is_active': 'on'})
         self.assertContains(response, 'Нельзя отключить собственный доступ')
         self.admin.refresh_from_db()
-        self.assertEqual(self.admin.role, 'admin')
+        self.assertEqual(self.admin.role, 'owner')
 
     def test_protected_history_relations(self):
         self.client.force_login(self.admin)
@@ -259,7 +259,7 @@ class WorkflowTests(TestCase):
     def test_room_cannot_be_disabled_with_active_bookings(self):
         self.client.force_login(self.admin)
         response = self.client.post(reverse('room_edit', args=[self.room.pk]),
-            {'name': self.room.name, 'beds': 2, 'capacity': 3, 'service_status': 'unavailable'})
+            {'name': self.room.name, 'beds': 2, 'capacity': 3, 'daily_rate': '7500', 'service_status': 'unavailable'})
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'действующие бронирования')
         self.room.refresh_from_db()
@@ -273,15 +273,17 @@ class WorkflowTests(TestCase):
             url = reverse('document_download', args=[doc.pk])
             self.assertEqual(self.client.get(url).status_code, 302)
             self.client.force_login(self.employee)
-            self.assertEqual(self.client.get(url).status_code, 403)
-            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 0)
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            b''.join(response.streaming_content)
+            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 1)
             self.client.force_login(self.admin)
             response = self.client.get(url)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response['Cache-Control'], 'private, no-store')
             self.assertIn('attachment', response['Content-Disposition'])
             self.assertEqual(b''.join(response.streaming_content), b'%PDF-1.4\n%%EOF')
-            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 1)
+            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 2)
             self.assertEqual(self.client.get('/media/' + doc.file.name).status_code, 404)
             self.assertEqual(self.client.get('/documents/../../.env').status_code, 404)
 

@@ -5,28 +5,33 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
+from .fields import EncryptedCharField
 
 
 class HotelUserManager(UserManager):
     def create_superuser(self, username, email=None, password=None, **extra_fields):
-        extra_fields.setdefault('role', 'admin')
+        extra_fields.setdefault('role', 'owner')
         return super().create_superuser(username, email, password, **extra_fields)
 
 
 class User(AbstractUser):
     class Role(models.TextChoices):
         ADMIN = 'admin', 'Администратор'
-        EMPLOYEE = 'employee', 'Сотрудник'
-    role = models.CharField('Роль', max_length=12, choices=Role.choices, default=Role.EMPLOYEE)
+        OWNER = 'owner', 'Владелец'
+    role = models.CharField('Роль', max_length=12, choices=Role.choices, default=Role.ADMIN)
     objects = HotelUserManager()
 
     @property
     def is_manager(self):
-        return self.is_active and (self.is_superuser or self.role == self.Role.ADMIN)
+        return self.is_active and self.role in self.Role.values
+
+    @property
+    def is_owner(self):
+        return self.is_active and self.role == self.Role.OWNER
 
 
 class Room(models.Model):
@@ -37,13 +42,15 @@ class Room(models.Model):
     name = models.CharField('Название / номер', max_length=80, unique=True)
     beds = models.PositiveSmallIntegerField('Количество кроватей', default=1, validators=[MinValueValidator(1)])
     capacity = models.PositiveSmallIntegerField('Максимум гостей', default=2, validators=[MinValueValidator(1)])
+    daily_rate = models.DecimalField('Тариф за сутки, ₽', max_digits=12, decimal_places=2, default=Decimal('0'), validators=[MinValueValidator(Decimal('0'))])
     comment = models.TextField('Комментарий', blank=True)
     active = models.BooleanField('Номер включён', default=True)
     service_status = models.CharField('Служебное состояние', max_length=16, choices=Service.choices, default=Service.READY)
 
     class Meta:
         ordering = ['name']
-        constraints = [models.CheckConstraint(condition=Q(beds__gt=0) & Q(capacity__gt=0), name='room_positive_capacity')]
+        constraints = [models.CheckConstraint(condition=Q(beds__gt=0) & Q(capacity__gt=0), name='room_positive_capacity'),
+                       models.CheckConstraint(condition=Q(daily_rate__gte=0), name='room_nonnegative_rate')]
 
     def __str__(self):
         return self.name
@@ -70,6 +77,10 @@ class Guest(models.Model):
     full_name = models.CharField('ФИО', max_length=200)
     phone = models.CharField('Телефон', max_length=40)
     email = models.EmailField('Электронная почта', blank=True)
+    passport_series = EncryptedCharField('Серия паспорта', max_length=4, blank=True, validators=[RegexValidator(r'^[0-9]{4}$', 'Серия должна содержать 4 цифры.')])
+    passport_number = EncryptedCharField('Номер паспорта', max_length=6, blank=True, validators=[RegexValidator(r'^[0-9]{6}$', 'Номер должен содержать 6 цифр.')])
+    passport_issued_by = EncryptedCharField('Кем выдан паспорт', max_length=300, blank=True)
+    passport_issued_on = models.DateField('Дата выдачи паспорта', null=True, blank=True)
     comment = models.TextField('Комментарий', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -78,6 +89,10 @@ class Guest(models.Model):
 
     def __str__(self):
         return f'{self.full_name} · {self.phone}'
+
+    def clean(self):
+        if bool(self.passport_series) != bool(self.passport_number):
+            raise ValidationError('Укажите и серию, и номер паспорта или оставьте оба поля пустыми.')
 
 
 class BookingQuerySet(models.QuerySet):
@@ -101,6 +116,7 @@ class Booking(models.Model):
     actual_check_out = models.DateTimeField('Фактический выезд', null=True, blank=True)
     guest_count = models.PositiveSmallIntegerField('Количество гостей', default=1, validators=[MinValueValidator(1)])
     total_cost = models.DecimalField('Стоимость проживания, ₽', max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
+    daily_rate = models.DecimalField('Сохранённый тариф за сутки, ₽', max_digits=12, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(Decimal('0'))])
     linen_sets = models.PositiveSmallIntegerField('Комплекты белья', default=0)
     comment = models.TextField('Комментарий', blank=True)
     status = models.CharField('Статус', max_length=12, choices=Status.choices, default=Status.RESERVED)
@@ -160,6 +176,10 @@ class Booking(models.Model):
         raise ValidationError('Бронирования нельзя удалять. Используйте отмену.')
 
     @property
+    def stay_days(self):
+        return max(1, (timezone.localtime(self.check_out).date() - timezone.localtime(self.check_in).date()).days)
+
+    @property
     def paid(self):
         if 'payments' in getattr(self, '_prefetched_objects_cache', {}):
             return sum((p.amount for p in self.payments.all()), Decimal('0.00'))
@@ -214,6 +234,10 @@ class Payment(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+    def clean(self):
+        if self.method == self.Method.OTHER and not self.comment.strip():
+            raise ValidationError({'comment': 'Для способа «Другое» укажите, как была выполнена оплата.'})
 
 
 def document_path(instance, filename):

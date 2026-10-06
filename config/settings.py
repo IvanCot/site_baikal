@@ -7,6 +7,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 SECRET_KEY = os.getenv('SECRET_KEY', '')
+PASSPORT_ENCRYPTION_KEY = os.getenv('PASSPORT_ENCRYPTION_KEY', '')
+if not PASSPORT_ENCRYPTION_KEY:
+    raise ImproperlyConfigured('Укажите отдельный PASSPORT_ENCRYPTION_KEY. Для первого запуска выполните scripts/setup_env.py.')
 if not SECRET_KEY:
     raise ImproperlyConfigured('Укажите SECRET_KEY в файле .env или переменных окружения.')
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
