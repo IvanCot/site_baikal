@@ -1,10 +1,8 @@
 from decimal import Decimal
-from copy import deepcopy
 from django import forms
 from django.contrib.auth.forms import UserCreationForm
 from django.core.exceptions import ValidationError
 from .models import Booking, Guest, Payment, Room, User
-from .validators import validate_document
 
 
 class DateTimeInput(forms.DateTimeInput):
@@ -12,27 +10,6 @@ class DateTimeInput(forms.DateTimeInput):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, format='%Y-%m-%dT%H:%M', **kwargs)
-
-
-class MultipleFileInput(forms.ClearableFileInput):
-    allow_multiple_selected = True
-
-
-class MultipleFileField(forms.FileField):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault('widget', MultipleFileInput(attrs={'accept': '.jpg,.jpeg,.png,.webp,.pdf'}))
-        super().__init__(*args, **kwargs)
-
-    def clean(self, data, initial=None):
-        files = data if isinstance(data, (list, tuple)) else [data] if data else []
-        if len(files) > 5:
-            raise ValidationError('За один раз можно загрузить не более 5 документов.')
-        result = []
-        for file in files:
-            file = super().clean(file, initial)
-            validate_document(file)
-            result.append(file)
-        return result
 
 
 class BookingForm(forms.ModelForm):
@@ -50,13 +27,6 @@ class BookingForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        passport_form = GuestForm()
-        for name in ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on', 'passport_photo']:
-            self.fields[name] = deepcopy(passport_form.fields[name])
-            if name != 'passport_photo':
-                self.fields[name].validators.extend(Guest._meta.get_field(name).validators)
-            if self.instance.pk and name != 'passport_photo':
-                self.fields[name].initial = getattr(self.instance.primary_guest, name)
         self.original = Booking.objects.filter(pk=self.instance.pk).first() if self.instance.pk else None
         self.fields['room'].queryset = Room.objects.filter(active=True).exclude(service_status=Room.Service.UNAVAILABLE)
         if self.instance.pk:
@@ -75,12 +45,7 @@ class BookingForm(forms.ModelForm):
             self.add_error('new_guest_name', 'Выберите существующего гостя или заполните нового, без одновременного ввода.')
         if data.get('prepayment') and data.get('payment_method') == 'other' and not data.get('payment_comment', '').strip():
             self.add_error('payment_comment', 'Для способа «Другое» укажите, как была выполнена оплата.')
-        if bool(data.get('passport_series')) != bool(data.get('passport_number')):
-            self.add_error('passport_number', 'Укажите и серию, и номер паспорта или оставьте оба поля пустыми.')
         return data
-
-    def clean_passport_photo(self):
-        return GuestForm.clean_passport_photo(self)
 
     def _post_clean(self):
         room = self.cleaned_data.get('room')
@@ -115,23 +80,10 @@ class RoomForm(forms.ModelForm):
 
 
 class GuestForm(forms.ModelForm):
-    passport_photo = forms.FileField(label='Фото паспорта (необязательно)', required=False,
-                                    widget=forms.ClearableFileInput(attrs={'accept': 'image/jpeg,image/png,image/webp'}),
-                                    help_text='JPG, PNG или WEBP, до 10 МБ. Фото будет доступно только после входа.')
     class Meta:
         model = Guest
-        fields = ['full_name', 'phone', 'email', 'passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on', 'comment']
-        widgets = {'comment': forms.Textarea(attrs={'rows': 3}), 'passport_series': forms.TextInput(attrs={'inputmode': 'numeric', 'pattern': '[0-9]{4}'}),
-                   'passport_number': forms.TextInput(attrs={'inputmode': 'numeric', 'pattern': '[0-9]{6}'}),
-                   'passport_issued_on': forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d')}
-
-    def clean_passport_photo(self):
-        photo = self.cleaned_data.get('passport_photo')
-        if photo:
-            validate_document(photo)
-            if photo.name.lower().rsplit('.', 1)[-1] not in ['jpg', 'jpeg', 'png', 'webp']:
-                raise ValidationError('Фото паспорта должно быть в формате JPG, PNG или WEBP.')
-        return photo
+        fields = ['full_name', 'phone', 'email', 'comment']
+        widgets = {'comment': forms.Textarea(attrs={'rows': 3})}
 
 
 class PaymentForm(forms.ModelForm):
@@ -139,17 +91,6 @@ class PaymentForm(forms.ModelForm):
         model = Payment
         fields = ['booking', 'paid_at', 'amount', 'method', 'comment']
         widgets = {'paid_at': DateTimeInput(), 'comment': forms.Textarea(attrs={'rows': 3})}
-
-
-class DocumentForm(forms.Form):
-    documents = MultipleFileField(label='Фото или сканы паспорта', required=True, help_text='JPG, PNG, WEBP, PDF — не более 10 МБ на файл. Файлы привязаны к этому гостю.')
-    comment = forms.CharField(label='Комментарий', max_length=400, required=False)
-
-    def clean_documents(self):
-        files = self.cleaned_data['documents']
-        if not files:
-            raise ValidationError('Выберите документ.')
-        return files
 
 
 class CreateUserForm(UserCreationForm):

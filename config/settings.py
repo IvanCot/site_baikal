@@ -7,9 +7,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 SECRET_KEY = os.getenv('SECRET_KEY', '')
-PASSPORT_ENCRYPTION_KEY = os.getenv('PASSPORT_ENCRYPTION_KEY', '')
-if not PASSPORT_ENCRYPTION_KEY:
-    raise ImproperlyConfigured('Укажите отдельный PASSPORT_ENCRYPTION_KEY. Для первого запуска выполните scripts/setup_env.py.')
 if not SECRET_KEY:
     raise ImproperlyConfigured('Укажите SECRET_KEY в файле .env или переменных окружения.')
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
@@ -63,8 +60,6 @@ LOGIN_REDIRECT_URL = 'dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024
 DATA_UPLOAD_MAX_MEMORY_SIZE = 60 * 1024 * 1024
-MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
-MAX_DOCUMENTS_PER_REQUEST = 5
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG

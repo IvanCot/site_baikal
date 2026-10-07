@@ -1,22 +1,17 @@
-import io
-import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest import skipUnless
 
-from PIL import Image
 from django.core.exceptions import ValidationError
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from hotel.forms import BookingForm
-from hotel.models import AuditLog, Booking, Document, Guest, Payment, Room, User
+from hotel.models import AuditLog, Booking, Guest, Payment, Room, User
 from hotel.services import transition
-from hotel.validators import validate_document
 
 
 @override_settings(SECURE_SSL_REDIRECT=False, ALLOWED_HOSTS=['testserver', 'localhost'])
@@ -156,7 +151,7 @@ class WorkflowTests(TestCase):
             self.assertEqual(self.client.post(reverse(name), {'role': 'owner'}).status_code, 403)
         detail = self.client.get(reverse('booking_detail', args=[self.booking.pk]))
         self.assertContains(detail, 'Стоимость')
-        self.assertContains(detail, 'Паспорт гостя')
+        self.assertNotContains(detail, 'Паспорт гостя')
 
     def test_admin_pages_render(self):
         self.client.force_login(self.admin)
@@ -171,25 +166,15 @@ class WorkflowTests(TestCase):
             with self.subTest(name=name):
                 self.assertEqual(self.client.get(reverse(name, args=[pk])).status_code, 200)
 
-    def test_booking_create_with_prepayment_and_personal_passport(self):
+    def test_booking_create_with_prepayment(self):
         self.client.force_login(self.admin)
-        stream = io.BytesIO()
-        Image.new('RGB', (20, 20), 'white').save(stream, format='PNG')
-        data = self.booking_data(passport_series='0012', passport_number='000123', passport_photo=SimpleUploadedFile('паспорт.png', stream.getvalue()))
-        with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
-            response = self.client.post(reverse('booking_create'), data)
-            self.assertEqual(response.status_code, 302)
-            created = Booking.objects.exclude(pk=self.booking.pk).get()
-            self.assertEqual(created.additional_guests.count(), 0)
-            self.assertEqual(created.paid, Decimal('5000'))
-            self.assertEqual(created.total_cost, Decimal('7500'))
-            self.assertEqual(created.documents.count(), 0)
-            self.guest.refresh_from_db()
-            self.assertEqual(self.guest.passport_series, '0012')
-            self.assertEqual(self.guest.passport_number, '000123')
-            self.assertEqual(self.guest.documents.count(), 1)
-            self.assertNotIn('паспорт', self.guest.documents.get().file.name)
-            self.assertTrue(AuditLog.objects.filter(action='Создание бронирования').exists())
+        response = self.client.post(reverse('booking_create'), self.booking_data())
+        self.assertEqual(response.status_code, 302)
+        created = Booking.objects.exclude(pk=self.booking.pk).get()
+        self.assertEqual(created.additional_guests.count(), 0)
+        self.assertEqual(created.paid, Decimal('5000'))
+        self.assertEqual(created.total_cost, Decimal('7500'))
+        self.assertTrue(AuditLog.objects.filter(action='Создание бронирования').exists())
 
     def test_new_guest_and_inline_validation(self):
         self.client.force_login(self.admin)
@@ -265,39 +250,6 @@ class WorkflowTests(TestCase):
         self.room.refresh_from_db()
         self.assertTrue(self.room.active)
         self.assertEqual(self.room.service_status, 'ready')
-
-    def test_document_auth_permissions_audit_no_public_media(self):
-        with tempfile.TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=directory):
-            doc = Document.objects.create(booking=self.booking, file=SimpleUploadedFile('паспорт.pdf', b'%PDF-1.4\n%%EOF'),
-                                          original_name='паспорт.pdf', uploaded_by=self.admin)
-            url = reverse('document_download', args=[doc.pk])
-            self.assertEqual(self.client.get(url).status_code, 302)
-            self.client.force_login(self.employee)
-            response = self.client.get(url)
-            self.assertEqual(response.status_code, 200)
-            b''.join(response.streaming_content)
-            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 1)
-            self.client.force_login(self.admin)
-            response = self.client.get(url)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response['Cache-Control'], 'private, no-store')
-            self.assertIn('attachment', response['Content-Disposition'])
-            self.assertEqual(b''.join(response.streaming_content), b'%PDF-1.4\n%%EOF')
-            self.assertEqual(AuditLog.objects.filter(action='Скачивание документа').count(), 2)
-            self.assertEqual(self.client.get('/media/' + doc.file.name).status_code, 404)
-            self.assertEqual(self.client.get('/documents/../../.env').status_code, 404)
-
-    def test_file_validation(self):
-        invalid = [SimpleUploadedFile('script.html', b'<script>alert(1)</script>'),
-                   SimpleUploadedFile('fake.jpg', b'not an image'), SimpleUploadedFile('fake.pdf', b'not pdf'),
-                   SimpleUploadedFile('empty.pdf', b''), SimpleUploadedFile('big.pdf', b'%PDF-' + b'x' * (10 * 1024 * 1024))]
-        for file in invalid:
-            with self.subTest(file=file.name), self.assertRaises(ValidationError):
-                validate_document(file)
-        stream = io.BytesIO()
-        Image.new('RGB', (20, 20), 'white').save(stream, format='PNG')
-        validate_document(SimpleUploadedFile('image.png', stream.getvalue()))
-        validate_document(SimpleUploadedFile('file.pdf', b'%PDF-1.4\n%%EOF'))
 
     @skipUnless(connection.vendor == 'postgresql', 'Требуется PostgreSQL')
     def test_postgres_constraint_protects_bulk_insert(self):

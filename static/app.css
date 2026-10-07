@@ -237,10 +237,9 @@ dd { min-width: 0; font-weight: 500; margin: 0; text-align: right; overflow-wrap
 .balance small { display: block; color: #819171; font-size: 12px; }
 .balance strong { display: block; font-size: 28px; margin-top: 5px; font-weight: 600; overflow-wrap: anywhere; }
 .finance-card { background: linear-gradient(130deg, #fffefa, #f7f8ed); }
-.payment-line, .document-line { padding: 15px 0; border-top: 1px solid #edf1e0; }
+.payment-line { padding: 15px 0; border-top: 1px solid #edf1e0; }
 .payment-line strong { font-size: 16px; font-weight: 600; }
-.payment-line small, .document-line small { display: block; font-size: 12px; color: #7d8f6d; margin: 5px 0; }
-.document-line a { font-size: 13px; color: #5b7950; overflow-wrap: anywhere; }
+.payment-line small { display: block; font-size: 12px; color: #7d8f6d; margin: 5px 0; }
 .room-management-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
 .pagination { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; justify-content: center; padding: 20px; font-size: 12px; color: #7a8c68; }
 .search-results { border-radius: 6px; background: #f1f5e6; }

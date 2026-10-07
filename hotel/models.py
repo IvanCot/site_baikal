@@ -5,11 +5,10 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator, RegexValidator
+from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
-from .fields import EncryptedCharField
 
 
 class HotelUserManager(UserManager):
@@ -77,10 +76,6 @@ class Guest(models.Model):
     full_name = models.CharField('ФИО', max_length=200)
     phone = models.CharField('Телефон', max_length=40)
     email = models.EmailField('Электронная почта', blank=True)
-    passport_series = EncryptedCharField('Серия паспорта', max_length=4, blank=True, validators=[RegexValidator(r'^[0-9]{4}$', 'Серия должна содержать 4 цифры.')])
-    passport_number = EncryptedCharField('Номер паспорта', max_length=6, blank=True, validators=[RegexValidator(r'^[0-9]{6}$', 'Номер должен содержать 6 цифр.')])
-    passport_issued_by = EncryptedCharField('Кем выдан паспорт', max_length=300, blank=True)
-    passport_issued_on = models.DateField('Дата выдачи паспорта', null=True, blank=True)
     comment = models.TextField('Комментарий', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -89,10 +84,6 @@ class Guest(models.Model):
 
     def __str__(self):
         return f'{self.full_name} · {self.phone}'
-
-    def clean(self):
-        if bool(self.passport_series) != bool(self.passport_number):
-            raise ValidationError('Укажите и серию, и номер паспорта или оставьте оба поля пустыми.')
 
 
 class BookingQuerySet(models.QuerySet):
@@ -241,20 +232,8 @@ class Payment(models.Model):
 
 
 def document_path(instance, filename):
+    """Совместимость с исторической миграцией 0001; новые файлы не принимаются."""
     return f'documents/{uuid.uuid4().hex}{Path(filename).suffix.lower()}'
-
-
-class Document(models.Model):
-    guest = models.ForeignKey(Guest, on_delete=models.PROTECT, related_name='documents', null=True, blank=True)
-    booking = models.ForeignKey(Booking, on_delete=models.PROTECT, related_name='documents', null=True, blank=True)
-    file = models.FileField(upload_to=document_path, max_length=240)
-    original_name = models.CharField(max_length=240)
-    comment = models.CharField('Комментарий', max_length=400, blank=True)
-    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    uploaded_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [models.CheckConstraint(condition=Q(guest__isnull=False) | Q(booking__isnull=False), name='document_has_owner')]
 
 
 class AuditLog(models.Model):

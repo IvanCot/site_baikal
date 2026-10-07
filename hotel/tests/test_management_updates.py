@@ -1,9 +1,7 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from cryptography.fernet import Fernet
-from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db import connection
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -157,49 +155,20 @@ class ManagementUpdatesTests(TestCase):
         self.assertEqual(self.client.get(reverse('audit')).status_code, 403)
         self.assertNotContains(self.client.get(reverse('settings')), reverse('audit'))
 
-    def test_passport_digits_and_pairs(self):
-        for fields in [{'passport_series': '123', 'passport_number': '123456'},
-                       {'passport_series': 'abcd', 'passport_number': '123456'},
-                       {'passport_series': '1234'}, {'passport_number': '123456'}]:
-            form = BookingForm(data=self.data(**fields))
-            self.assertFalse(form.is_valid(), fields)
-        self.create_booking(passport_series='0012', passport_number='000123', passport_issued_by='Тестовое подразделение')
-        self.guest.refresh_from_db()
-        self.assertEqual(self.guest.passport_series, '0012')
-        self.assertEqual(self.guest.passport_number, '000123')
-        self.assertFalse(AuditLog.objects.filter(description__contains='000123').exists())
-
-    def test_passport_ciphertext_in_database_and_roundtrip(self):
-        self.guest.passport_series, self.guest.passport_number = '0012', '000123'
-        self.guest.passport_issued_by = 'Тестовый орган'
-        self.guest.save()
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT passport_series, passport_number, passport_issued_by FROM hotel_guest WHERE id = %s', [self.guest.pk])
-            stored = cursor.fetchone()
-        for token in stored:
-            self.assertTrue(token.startswith('enc:v1:'))
-        self.assertNotIn('000123', stored[1])
-        self.guest.refresh_from_db()
-        self.assertEqual(self.guest.passport_number, '000123')
-        self.guest.save()
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT passport_number FROM hotel_guest WHERE id = %s', [self.guest.pk])
-            self.assertNotEqual(cursor.fetchone()[0], stored[1])
-        with override_settings(PASSPORT_ENCRYPTION_KEY=Fernet.generate_key().decode()):
-            with self.assertRaises(ImproperlyConfigured):
-                Guest.objects.get(pk=self.guest.pk)
-
-    def test_corrupt_ciphertext_fails_closed(self):
-        with connection.cursor() as cursor:
-            cursor.execute('UPDATE hotel_guest SET passport_number = %s WHERE id = %s', ['enc:v1:corrupt', self.guest.pk])
-        with self.assertRaises(ImproperlyConfigured):
-            Guest.objects.get(pk=self.guest.pk)
-
-    def test_passport_endpoint_requires_login_and_disables_cache(self):
-        url = reverse('guest_passport', args=[self.guest.pk])
-        self.assertEqual(self.client.get(url).status_code, 302)
-        self.client.force_login(self.admin)
-        self.assertEqual(self.client.get(url)['Cache-Control'], 'private, no-store')
+    def test_passport_fields_and_routes_removed(self):
+        booking = self.create_booking()
+        for name in ['booking_create', 'guest_create']:
+            response = self.client.get(reverse(name))
+            self.assertNotContains(response, 'паспорт', html=False)
+            self.assertFalse(any(field.startswith('passport_') for field in response.context['form'].fields))
+        for name, pk in [('booking_detail', booking.pk), ('guest_detail', self.guest.pk)]:
+            response = self.client.get(reverse(name, args=[pk]))
+            self.assertNotContains(response, 'Паспорт')
+            self.assertNotContains(response, '/documents/')
+        for path in [f'/guests/{self.guest.pk}/passport/', '/documents/1/',
+                     f'/documents/upload/guest/{self.guest.pk}/']:
+            self.assertEqual(self.client.get(path).status_code, 404)
+            self.assertEqual(self.client.post(path, {}).status_code, 404)
 
     def test_payments_group_without_losing_transactions(self):
         booking = self.create_booking()

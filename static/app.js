@@ -67,44 +67,6 @@ document.addEventListener('DOMContentLoaded', () => {
     prepayment?.addEventListener('input', updateRequired);
     updateRequired();
   }
-  const selectedGuest = document.getElementById('id_primary_guest');
-  if (selectedGuest) {
-    let passportRequest;
-    let passportReady = true;
-    const status = document.getElementById('passport-load-status');
-    const names = ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on'];
-    selectedGuest.form.addEventListener('submit', event => {
-      if (!passportReady) {
-        event.preventDefault();
-        status.textContent = 'Сначала дождитесь загрузки паспорта или повторно выберите гостя.';
-        status.scrollIntoView({block: 'center'});
-      }
-    });
-    selectedGuest.addEventListener('change', async () => {
-      passportRequest?.abort();
-      passportRequest = new AbortController();
-      const activeRequest = passportRequest;
-      passportReady = !selectedGuest.value;
-      const fields = names.map(name => document.getElementById(`id_${name}`));
-      fields.forEach(field => { field.value = ''; field.disabled = !!selectedGuest.value; });
-      document.getElementById('id_passport_photo').value = '';
-      status.textContent = selectedGuest.value ? 'Загружаем данные выбранного гостя…' : '';
-      if (!selectedGuest.value) return;
-      try {
-        const response = await fetch(`/guests/${selectedGuest.value}/passport/`, {signal: activeRequest.signal, cache: 'no-store'});
-        if (!response.ok) throw new Error();
-        const data = await response.json();
-        if (activeRequest !== passportRequest) return;
-        names.forEach((name, index) => { fields[index].value = data[name]; });
-        passportReady = true;
-        status.textContent = 'Данные выбранного гостя загружены.';
-      } catch (error) {
-        if (error.name !== 'AbortError') status.textContent = 'Не удалось загрузить паспорт. Повторно выберите гостя.';
-      } finally {
-        if (activeRequest === passportRequest) fields.forEach(field => { field.disabled = false; });
-      }
-    });
-  }
   document.addEventListener('keydown', event => {
     if (!sidebar?.classList.contains('open')) return;
     if (event.key === 'Escape') setMenu(false, true);

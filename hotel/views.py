@@ -1,6 +1,5 @@
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
@@ -11,15 +10,15 @@ from django.db import IntegrityError, transaction
 from django.db.models import DecimalField, F, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce
-from django.http import FileResponse, Http404, JsonResponse
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.views.decorators.cache import never_cache
 
-from .forms import (BookingForm, CreateUserForm, DocumentForm, EditUserForm, GuestForm,
+from .forms import (BookingForm, CreateUserForm, EditUserForm, GuestForm,
                     PaymentForm, RoomForm)
-from .models import AuditLog, Booking, BookingGuest, Document, Guest, Payment, Room, User
+from .models import AuditLog, Booking, Guest, Payment, Room, User
 from .permissions import manager_required, owner_required
 from .services import audit, price_booking, transition
 
@@ -91,7 +90,7 @@ def calendar(request):
 
 @login_required
 def booking_list(request, history=False):
-    qs = Booking.objects.select_related('room', 'primary_guest').prefetch_related('payments', 'documents')
+    qs = Booking.objects.select_related('room', 'primary_guest').prefetch_related('payments')
     if history:
         qs = qs.filter(status__in=['completed', 'cancelled'])
     q = request.GET.get('q', '').strip()[:200]
@@ -130,17 +129,6 @@ def booking_detail(request, pk):
     return render(request, 'booking_detail.html', {'title': str(booking), 'booking': booking})
 
 
-def save_documents(files, user, guest=None, booking=None, comment='', saved=None):
-    saved = saved if saved is not None else []
-    for file in files:
-        doc = Document(guest=guest, booking=booking, original_name=Path(file.name).name[:240],
-                       uploaded_by=user, comment=comment)
-        doc.file.save(file.name, file, save=False)
-        saved.append(doc.file)
-        doc.save()
-        audit(user, 'Загрузка документа', doc, 'Прикреплён защищённый документ.')
-
-
 @manager_required
 @never_cache
 def booking_edit(request, pk=None):
@@ -153,9 +141,8 @@ def booking_edit(request, pk=None):
     initial = {'room': room_id if room_id.isdigit() else None,
                'check_in': timezone.make_aware(datetime.combine(day, time(14))),
                'check_out': timezone.make_aware(datetime.combine(day + timedelta(days=1), time(12)))}
-    form = BookingForm(request.POST or None, request.FILES or None, instance=booking, initial=initial)
+    form = BookingForm(request.POST or None, instance=booking, initial=initial)
     if request.method == 'POST' and form.is_valid():
-        saved_files = []
         try:
             with transaction.atomic():
                 obj = form.save(commit=False)
@@ -175,18 +162,6 @@ def booking_edit(request, pk=None):
                     obj.primary_guest = guest
                     if created:
                         audit(request.user, 'Создание гостя', guest, 'Создан гость при бронировании.')
-                passport_names = ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on']
-                if any(name in request.POST for name in passport_names):
-                    guest = Guest.objects.select_for_update().get(pk=obj.primary_guest_id)
-                    for name in passport_names:
-                        setattr(guest, name, form.cleaned_data.get(name))
-                    guest.full_clean()
-                    guest.save(update_fields=passport_names)
-                    obj.primary_guest = guest
-                    audit(request.user, 'Паспортные данные', guest, 'Обновлены паспортные данные гостя при бронировании.')
-                if form.cleaned_data.get('passport_photo'):
-                    save_documents([form.cleaned_data['passport_photo']], request.user, guest=obj.primary_guest,
-                                   comment='Фото паспорта', saved=saved_files)
                 obj.save()
                 if not pk and form.cleaned_data.get('prepayment'):
                     payment = Payment.objects.create(booking=obj, amount=form.cleaned_data['prepayment'], method=form.cleaned_data['payment_method'], comment=form.cleaned_data.get('payment_comment', ''), created_by=request.user)
@@ -204,18 +179,12 @@ def booking_edit(request, pk=None):
                                 changes.append('Комментарий изменён')
                             else:
                                 changes.append(f'{label}: {old} → {new}')
-                    description = f'Бронирование №{obj.number}: ' + ('; '.join(changes) or 'обновлён состав гостей / документы')
+                    description = f'Бронирование №{obj.number}: ' + ('; '.join(changes) or 'сохранено без изменений')
                 audit(request.user, 'Изменение бронирования' if pk else 'Создание бронирования', obj, description)
             messages.success(request, 'Бронирование сохранено.')
             return redirect('booking_detail', pk=obj.pk)
         except (ValidationError, IntegrityError) as error:
-            for file in saved_files:
-                file.delete(save=False)
             form.add_error(None, validation_message(error) if isinstance(error, ValidationError) else 'Номер уже забронирован другим пользователем. Выберите другой интервал.')
-        except Exception:
-            for file in saved_files:
-                file.delete(save=False)
-            raise
     rates = {str(room.pk): str(room.daily_rate) for room in form.fields['room'].queryset}
     original = form.original
     pricing = {'rates': rates, 'original': {'room': str(original.room_id), 'rate': str(original.daily_rate) if original.daily_rate is not None else None,
@@ -308,30 +277,14 @@ def guest_search(request):
 
 
 @manager_required
-def guest_passport(request, pk):
-    guest = get_object_or_404(Guest, pk=pk)
-    response = JsonResponse({name: getattr(guest, name) or '' for name in ['passport_series', 'passport_number', 'passport_issued_by', 'passport_issued_on']})
-    response['Cache-Control'] = 'private, no-store'
-    return response
-
-
-@manager_required
 @never_cache
 def guest_edit(request, pk=None):
     obj = get_object_or_404(Guest, pk=pk) if pk else None
-    form = GuestForm(request.POST or None, request.FILES or None, instance=obj)
+    form = GuestForm(request.POST or None, instance=obj)
     if request.method == 'POST' and form.is_valid():
-        saved = []
-        try:
-            with transaction.atomic():
-                obj = form.save()
-                if form.cleaned_data.get('passport_photo'):
-                    save_documents([form.cleaned_data['passport_photo']], request.user, guest=obj, comment='Фото паспорта', saved=saved)
-                audit(request.user, 'Изменение гостя' if pk else 'Создание гостя', obj, 'Сохранена карточка гостя.')
-        except Exception:
-            for file in saved:
-                file.delete(save=False)
-            raise
+        with transaction.atomic():
+            obj = form.save()
+            audit(request.user, 'Изменение гостя' if pk else 'Создание гостя', obj, 'Сохранена карточка гостя.')
         messages.success(request, 'Карточка гостя сохранена.')
         return redirect('guest_detail', pk=obj.pk)
     return render(request, 'form.html', {'title': 'Редактировать гостя' if pk else 'Новый гость', 'form': form})
@@ -355,9 +308,9 @@ def guest_delete(request, pk):
                 guest.delete()
             messages.success(request, 'Гость удалён.')
         except ProtectedError:
-            messages.error(request, 'У гостя есть бронирования или документы. Карточка сохраняется для истории.')
+            messages.error(request, 'У гостя есть бронирования. Карточка сохраняется для истории.')
         return redirect('guests')
-    return render(request, 'confirm.html', {'title': 'Удалить гостя?', 'description': 'Удаление возможно только при отсутствии бронирований и документов.'})
+    return render(request, 'confirm.html', {'title': 'Удалить гостя?', 'description': 'Удаление возможно только при отсутствии бронирований.'})
 
 
 @manager_required
@@ -405,42 +358,6 @@ def payment_delete(request, pk):
         messages.success(request, 'Ошибочный платёж удалён. Баланс пересчитан.')
         return redirect('booking_detail', pk=booking_id)
     return render(request, 'confirm.html', {'title': 'Удалить ошибочный платёж?', 'description': 'Операция будет записана в журнал. Баланс бронирования изменится.'})
-
-
-@manager_required
-def document_upload(request, kind, pk):
-    if kind not in ['guest', 'booking']:
-        raise Http404
-    obj = get_object_or_404(Guest if kind == 'guest' else Booking, pk=pk)
-    if kind == 'booking':
-        return redirect('guest_edit', pk=obj.primary_guest_id)
-    form = DocumentForm(request.POST or None, request.FILES or None)
-    if request.method == 'POST' and form.is_valid():
-        saved = []
-        try:
-            with transaction.atomic():
-                save_documents(form.cleaned_data['documents'], request.user, comment=form.cleaned_data['comment'], saved=saved, **{kind: obj})
-        except Exception:
-            for file in saved:
-                file.delete(save=False)
-            raise
-        messages.success(request, 'Документы загружены.')
-        return redirect('guest_detail' if kind == 'guest' else 'booking_detail', pk=pk)
-    return render(request, 'form.html', {'title': f'Фото / сканы паспорта: {obj.full_name}', 'form': form})
-
-
-@manager_required
-def document_download(request, pk):
-    doc = get_object_or_404(Document, pk=pk)
-    try:
-        file = doc.file.open('rb')
-    except (FileNotFoundError, ValueError):
-        raise Http404
-    audit(request.user, 'Скачивание документа', doc, 'Доступ к защищённому документу.')
-    response = FileResponse(file, as_attachment=True, filename=doc.original_name, content_type='application/octet-stream')
-    response['Cache-Control'] = 'private, no-store'
-    response['X-Content-Type-Options'] = 'nosniff'
-    return response
 
 
 @manager_required
